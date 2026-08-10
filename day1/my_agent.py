@@ -345,7 +345,7 @@ def quality_router(state: AgentState) -> str:
 #
 # WHERE TO LOOK: Graph API docs → "Edges".
 
-workflow = StateGraph(AgentState)
+workflow = StateGraph(AgentState) 
 
 workflow.add_node("collect", collect_node)
 workflow.add_node("store_memory", store_memory_node)

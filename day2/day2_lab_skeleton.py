@@ -1,47 +1,3 @@
-# ============================================================
-# DAY 2 LAB — SKELETON: Build a Multi-Agent Research Team
-# ============================================================
-# Fill in every TODO. Don't open the solution (day2_lab_solution.py)
-# until you pass the self-check at the bottom.
-#
-# WHAT CHANGES FROM DAY 1 — read this table twice:
-#
-#   Day 1 (single agent)              Day 2 (multi-agent)
-#   ─────────────────────             ─────────────────────────────
-#   nodes = Python functions          nodes = LLM agents w/ personas
-#   routing = your if/else            routing = supervisor LLM decides
-#   one prompt for everything         one system prompt PER agent
-#   tools available everywhere        tools SCOPED (only researcher
-#                                       can search the web)
-#   loop = quality-score retry        loop = critic sends draft back
-#                                       to writer for revision
-#
-# What does NOT change: State + Nodes + Edges. A multi-agent system
-# is STILL just a StateGraph. If you can build Day 1, you can build
-# this — the new ideas are personas, the supervisor, and guardrails.
-#
-# The system you're building (the SUPERVISOR pattern):
-#
-#              ┌──────────── supervisor ─────────────┐
-#              │       (LLM decides who's next)      │
-#     ┌────────┼───────────┬───────────┬─────────────┤
-#     ↓        ↓           ↓           ↓             ↓
-#  researcher  analyst    writer     critic       FINISH
-#     │        │           │           │             ↓
-#     └────────┴───────────┴───────────┘            END
-#          (every worker reports back to the supervisor)
-#
-# Recommended reading BEFORE you start (~25 min):
-#   1. Multi-agent concepts (architectures, supervisor pattern):
-#      https://docs.langchain.com/oss/python/langgraph/multi-agent
-#   2. Refresh: conditional branching + loops (you need both again):
-#      https://docs.langchain.com/oss/python/langgraph/use-graph-api#conditional-branching
-#   3. Structured output (the supervisor's decision is structured!):
-#      https://docs.langchain.com/oss/python/langchain/structured-output
-#
-# Setup: same as Day 1 — `uv sync`, keys in .env, or USE_FAKE=1.
-# ============================================================
-
 import os
 import operator
 from datetime import datetime
@@ -52,51 +8,31 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from langchain_tavily import TavilySearch
 
-# TODO STEP 0 — same imports as Day 1:
-# StateGraph, START, END from langgraph.graph
-# InMemorySaver from langgraph.checkpoint.memory
+from langgraph.graph import StateGraph, START, END
+from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 
-MAX_REVISIONS = 2      # cap on writer↔critic loops
+MAX_REVISIONS = 2      # cap on writer<->critic loops
 MAX_TURNS = 12         # cap on total supervisor decisions
 
+USE_FAKE = os.getenv("USE_FAKE") == "1"
 
-# ============================================================
-# STEP 1 — SHARED STATE: the team's "blackboard"
-# ============================================================
-# Day 1's state was a data PIPELINE (each field filled once, in
-# order). Day 2's state is a BLACKBOARD: every agent reads all of
-# it and writes only its own section; the supervisor reads it to
-# decide who goes next.
-#
-# Define a TypedDict with:
-#   task (str)
-#   research_notes  <- List[str], APPEND-ONLY (which reducer? Day 1!)
-#   analysis (str), draft (str), critique (str)
-#   revision_count (int), turn_count (int)
-#   next_agent (str)   <- the supervisor writes its decision HERE
-#   execution_logs     <- append-only, same as Day 1
-#
-# ASK YOURSELF: why must research_notes append but draft overwrite?
-# What would happen to the revision loop if draft used operator.add?
 
 class TeamState(TypedDict):
     task: str
-    # TODO: add the remaining 8 keys (two use Annotated + operator.add)
-    pass
+    research_notes: Annotated[List[str], operator.add]
+    analysis: str
+    draft: str
+    critique: str
+    revision_count: int
+    turn_count: int
+    next_agent: str
+    execution_logs: Annotated[List[str], operator.add]
 
-
-# ============================================================
-# STEP 2 — STRUCTURED ROUTING DECISION
-# ============================================================
-# Day 1: structured output produced a quality SCORE.
-# Day 2: structured output produces a ROUTING DECISION — this is
-# the trick that turns an LLM into a supervisor. Literal[...] means
-# the model CANNOT invent an agent that doesn't exist.
-#
-# WHERE TO LOOK: structured-output docs (same page as Day 1).
 
 class RouterDecision(BaseModel):
     """The supervisor's choice of who acts next."""
@@ -104,146 +40,223 @@ class RouterDecision(BaseModel):
     reason: str = Field(description="One sentence explaining the choice")
 
 
-# ============================================================
-# STEP 3 — ONE LLM, FOUR PERSONAS (+ tools scoped per agent)
-# ============================================================
-# A multi-agent "team" doesn't need four models — it needs four
-# SYSTEM PROMPTS. (In production you might also vary the model per
-# agent: cheap model for the critic, big one for the writer.)
-#
-# TODO:
-# 1. Write a PERSONAS dict: role -> system prompt, for
-#    "researcher", "analyst", "writer", "critic".
-#    Each persona must say what the agent DOES and what it MUST NOT
-#    do (e.g. the researcher never analyzes). Boundaries between
-#    agents live in the prompts — write them sharp.
-# 2. Create llm (ChatOpenAI + OpenRouter, exactly like Day 1) and
-#    search_tool (TavilySearch(max_results=4)).
-# 3. supervisor_llm = llm.with_structured_output(RouterDecision)
-# 4. Helper: run_persona(role, user_content) → invoke llm with
-#    [SystemMessage(PERSONAS[role]), HumanMessage(user_content)]
-#    and return response.content.
-#
-# TOOL SCOPING: only the researcher node may call search_tool.
-# That's a deliberate design decision, not a limitation — ask
-# yourself what could go wrong if the critic could search.
-
 PERSONAS = {
-    # TODO: four personas
+    "researcher": (
+        "You are a Researcher on an enterprise research team. "
+        "Your ONLY job is to gather and condense factual information "
+        "from search results into clear, well-organized notes. "
+        "You do NOT analyze, interpret, or draw conclusions - that is "
+        "the analyst's job. You do NOT write reports - that is the "
+        "writer's job. Stick strictly to summarizing what the sources say."
+    ),
+    "analyst": (
+        "You are an Analyst on an enterprise research team. "
+        "Your job is to take raw research notes and extract insights: "
+        "patterns, implications, risks, and opportunities. "
+        "You do NOT search the web yourself - you only work with the "
+        "notes given to you. You do NOT write the final report - that "
+        "is the writer's job. Produce a structured analysis, not prose."
+    ),
+    "writer": (
+        "You are a Writer on an enterprise research team. "
+        "Your job is to turn the analysis into a clear, professional "
+        "report with an executive summary, key findings, and a "
+        "conclusion. If you are given a previous draft AND a critique, "
+        "revise the draft to address EVERY point in the critique - "
+        "do not ignore feedback. You do NOT do research or analysis "
+        "yourself - you only write based on what's given to you."
+    ),
+    "critic": (
+        "You are a Critic on an enterprise research team. Your job is "
+        "to review a draft report against the research notes and "
+        "analysis, and judge whether it is accurate, complete, and "
+        "well-written. If the draft is good, respond with exactly: "
+        "'APPROVED'. If it needs work, respond with 'REVISE: ' "
+        "followed by specific, actionable fixes. You do NOT rewrite "
+        "the draft yourself - only critique it. You do NOT search "
+        "the web."
+    ),
 }
 
-# TODO: llm, search_tool, supervisor_llm, run_persona
+llm = ChatOpenAI(
+    model="nvidia/nemotron-3-super-120b-a12b:free",
+    temperature=0,
+    base_url="https://openrouter.ai/api/v1",
+)
+
+search_tool = TavilySearch(max_results=4)
+
+supervisor_llm = llm.with_structured_output(RouterDecision)
 
 
-# ============================================================
-# STEP 4 — THE SUPERVISOR NODE (the piece Day 1 didn't have)
-# ============================================================
-# The supervisor node must:
-# 1. Increment turn_count.
-# 2. Build a STATUS SUMMARY of the blackboard (which sections are
-#    filled? what does the critique say? how many revisions?).
-#    Don't dump the full text of everything — the supervisor needs
-#    STATUS, not content. (Why? Think tokens and attention.)
-# 3. Ask supervisor_llm for a RouterDecision.
-# 4. GUARDRAILS — never trust an LLM to terminate a loop:
-#      a) if turn_count > MAX_TURNS → force FINISH
-#      b) if the LLM picks writer/critic but revision_count >=
-#         MAX_REVISIONS and a draft exists → force FINISH
-#    This is Day 1's iteration cap wearing a new hat. Same lesson:
-#    the LLM proposes, YOUR CODE disposes.
-# 5. Return {"next_agent": ..., "turn_count": ..., "execution_logs": [...]}
-#
-# WHERE TO LOOK: multi-agent docs → "Supervisor" section.
+def run_persona(role: str, user_content: str) -> str:
+    """Invoke the LLM wearing a specific persona's system prompt."""
+    response = llm.invoke([
+        SystemMessage(PERSONAS[role]),
+        HumanMessage(user_content),
+    ])
+    return response.content
+
+
+def fake_search_results(query: str):
+    return [
+        {"title": f"Source on {query} #1", "content": f"Key findings about {query}, part one.", "url": "https://example.com/1"},
+        {"title": f"Source on {query} #2", "content": f"Key findings about {query}, part two.", "url": "https://example.com/2"},
+    ]
+
 
 def supervisor_node(state: TeamState):
-    # TODO
-    pass
+    """Decide who acts next, with hard guardrails the LLM can't override."""
+    turn_count = state["turn_count"] + 1
 
+    status = f"""Task: {state['task']}
 
-# ============================================================
-# STEP 5 — WORKER AGENT NODES
-# ============================================================
-# Each worker: read the blackboard → act in persona → return a
-# PARTIAL update with ONLY its own section (Day 1 rule, unchanged).
+Status:
+- research_notes: {'filled (' + str(len(state['research_notes'])) + ' notes)' if state['research_notes'] else 'EMPTY'}
+- analysis: {'filled' if state['analysis'] else 'EMPTY'}
+- draft: {'filled' if state['draft'] else 'EMPTY'}
+- critique: {state['critique'] if state['critique'] else 'none yet'}
+- revision_count: {state['revision_count']}/{MAX_REVISIONS}
+- turn_count: {turn_count}/{MAX_TURNS}
+
+Decide which agent acts next: researcher, analyst, writer, critic, or FINISH.
+Typical order: researcher -> analyst -> writer -> critic -> (writer again if REVISE) -> FINISH."""
+
+    decision = supervisor_llm.invoke(status)
+    next_agent = decision.next_agent
+    log_line = f"[supervisor] turn {turn_count}: chose {next_agent} - {decision.reason}"
+
+    if turn_count > MAX_TURNS:
+        next_agent = "FINISH"
+        log_line = f"[supervisor] turn {turn_count}: FORCED FINISH (turn cap reached)"
+    elif next_agent in ("writer", "critic") and state["revision_count"] >= MAX_REVISIONS and state["draft"]:
+        next_agent = "FINISH"
+        log_line = f"[supervisor] turn {turn_count}: FORCED FINISH (revision cap reached)"
+
+    return {
+        "next_agent": next_agent,
+        "turn_count": turn_count,
+        "execution_logs": [log_line],
+    }
+
 
 def researcher_node(state: TeamState):
     """Search the web (ONLY this agent may), condense to notes."""
-    # TODO:
-    # 1. results = search_tool.invoke({"query": state["task"]})["results"]
-    # 2. Format results into a raw text block (title, content, url)
-    # 3. notes = run_persona("researcher", f"Task ...\n\nSearch results:\n{raw}")
-    # 4. return {"research_notes": [notes], "execution_logs": [...]}
-    #    ^ note the LIST — research_notes is append-only!
-    pass
+    if USE_FAKE:
+        results = fake_search_results(state["task"])
+    else:
+        results = search_tool.invoke({"query": state["task"]})["results"]
+
+    raw = "\n\n".join(
+        f"Title: {r['title']}\nContent: {r['content']}\nURL: {r.get('url', 'N/A')}"
+        for r in results
+    )
+
+    notes = run_persona(
+        "researcher",
+        f"Task: {state['task']}\n\nSearch results:\n{raw}",
+    )
+
+    return {
+        "research_notes": [notes],
+        "execution_logs": [f"[researcher] condensed {len(results)} sources into notes"],
+    }
 
 
 def analyst_node(state: TeamState):
     """Turn raw notes into analysis."""
-    # TODO: run_persona("analyst", ...) → {"analysis": ..., "execution_logs": [...]}
-    pass
+    notes_text = "\n\n".join(state["research_notes"])
+
+    analysis = run_persona(
+        "analyst",
+        f"Task: {state['task']}\n\nResearch notes:\n{notes_text}",
+    )
+
+    return {
+        "analysis": analysis,
+        "execution_logs": ["[analyst] produced analysis"],
+    }
 
 
 def writer_node(state: TeamState):
-    """Write the draft — or REVISE it if a critique is present."""
-    # TODO:
-    # 1. revising = critique exists and starts with "REVISE"
-    # 2. Build the prompt; when revising, include the previous draft
-    #    AND the critique so the writer knows what to fix.
-    # 3. return {"draft": ...,
-    #            "critique": "",   <- WHY reset this? (see self-check)
-    #            "revision_count": +1 only when revising,
-    #            "execution_logs": [...]}
-    pass
+    """Write the draft - or revise it if a critique is present."""
+    revising = bool(state["critique"]) and state["critique"].startswith("REVISE")
+
+    if revising:
+        prompt = (
+            f"Task: {state['task']}\n\n"
+            f"Analysis:\n{state['analysis']}\n\n"
+            f"Previous draft:\n{state['draft']}\n\n"
+            f"Critique to address:\n{state['critique']}\n\n"
+            f"Revise the draft to fix every point in the critique."
+        )
+    else:
+        prompt = f"Task: {state['task']}\n\nAnalysis:\n{state['analysis']}\n\nWrite the report."
+
+    draft = run_persona("writer", prompt)
+
+    return {
+        "draft": draft,
+        "critique": "",
+        "revision_count": state["revision_count"] + 1 if revising else state["revision_count"],
+        "execution_logs": [f"[writer] {'revised' if revising else 'wrote initial'} draft"],
+    }
 
 
 def critic_node(state: TeamState):
-    """Review the draft against the research notes."""
-    # TODO: run_persona("critic", ...) → the persona replies either
-    # "APPROVED" or "REVISE: <fixes>". Store it in critique.
-    pass
+    """Review the draft against the research notes and analysis."""
+    notes_text = "\n\n".join(state["research_notes"])
+
+    verdict = run_persona(
+        "critic",
+        f"Task: {state['task']}\n\nResearch notes:\n{notes_text}\n\n"
+        f"Analysis:\n{state['analysis']}\n\nDraft to review:\n{state['draft']}",
+    )
+
+    return {
+        "critique": verdict,
+        "execution_logs": [f"[critic] verdict: {verdict[:60]}..."],
+    }
 
 
-# ============================================================
-# STEP 6 — ROUTING FUNCTION + WIRE THE GRAPH
-# ============================================================
-# The conditional-edge function is now TRIVIAL — it just reads the
-# supervisor's decision:
-#
-#     def route_from_supervisor(state) -> str:
-#         return state["next_agent"]
-#
-# Compare with Day 1, where all decision logic lived inside
-# quality_router. The intelligence MOVED from the edge into a node.
-#
-# Wiring checklist:
-# 1. add all five nodes
-# 2. START → supervisor
-# 3. add_conditional_edges("supervisor", route_from_supervisor,
-#        {"researcher": "researcher", "analyst": "analyst",
-#         "writer": "writer", "critic": "critic", "FINISH": END})
-# 4. EVERY worker gets an edge BACK to supervisor — the
-#    hub-and-spoke shape that defines the supervisor pattern.
-#    (A for-loop over the four worker names is idiomatic.)
-
-# TODO: route_from_supervisor + graph wiring
+def route_from_supervisor(state: TeamState) -> str:
+    """Just reads the supervisor's decision - no logic here."""
+    return state["next_agent"]
 
 
-# ============================================================
-# STEP 7 — COMPILE, VISUALIZE, RUN
-# ============================================================
-# Same as Day 1: compile with InMemorySaver, print the Mermaid
-# diagram (it should look like a STAR, not Day 1's chain), stream
-# with stream_mode="values" and a thread_id, print the final draft.
-#
-# EXPERIMENT 1: set MAX_REVISIONS = 0. What happens to quality?
-# EXPERIMENT 2: delete guardrail (a) and make the critic always
-#   say REVISE. Watch the turn cap save you — then delete guardrail
-#   (b) too and meet your old friend GraphRecursionError.
-# EXPERIMENT 3: swap the analyst's persona for a terrible one
-#   ("you are vague and generic"). How far does the damage spread
-#   through the team? This is why persona boundaries matter.
+workflow = StateGraph(TeamState)
+
+workflow.add_node("supervisor", supervisor_node)
+workflow.add_node("researcher", researcher_node)
+workflow.add_node("analyst", analyst_node)
+workflow.add_node("writer", writer_node)
+workflow.add_node("critic", critic_node)
+
+workflow.add_edge(START, "supervisor")
+
+workflow.add_conditional_edges(
+    "supervisor",
+    route_from_supervisor,
+    {
+        "researcher": "researcher",
+        "analyst": "analyst",
+        "writer": "writer",
+        "critic": "critic",
+        "FINISH": END,
+    },
+)
+
+for worker in ["researcher", "analyst", "writer", "critic"]:
+    workflow.add_edge(worker, "supervisor")
+
 
 if __name__ == "__main__":
+    app = workflow.compile(checkpointer=InMemorySaver())
+
+    print("=== MERMAID DIAGRAM (paste into mermaid.live) ===")
+    print(app.get_graph().draw_mermaid())
+    print()
+
     initial_state = {
         "task": "Should our company adopt multi-agent AI systems in 2026?",
         "research_notes": [],
@@ -255,28 +268,23 @@ if __name__ == "__main__":
         "next_agent": "",
         "execution_logs": [],
     }
-    # TODO: compile, visualize, stream, print final draft + stats
 
+    config = {"configurable": {"thread_id": "run-1"}}
 
-# ============================================================
-# SELF-CHECK before you look at the solution
-# ============================================================
-# [ ] I can explain the supervisor pattern in one sentence
-# [ ] My routing function reads state — the DECISION was made in a node
-# [ ] research_notes appends; draft overwrites; I know why each
-# [ ] The writer RESETS critique — I can explain what breaks if not
-#     (hint: what does the supervisor see on the turn after a revision?)
-# [ ] Only researcher_node touches search_tool
-# [ ] My supervisor has BOTH guardrails, and I triggered EXPERIMENT 2
-# [ ] My Mermaid diagram is a star: supervisor in the middle
-# [ ] I can name one task where Day 1's single agent is the BETTER
-#     design (multi-agent is not free: more calls, more latency,
-#     more places to break — coordination must earn its cost)
-#
-# Stuck? Debugging order that works:
-#   1. stream_mode="updates" — watch each supervisor decision + reason
-#   2. print the status summary your supervisor_node builds — is the
-#      LLM seeing an accurate picture of the blackboard?
-#   3. check your conditional-edge dict covers ALL five decisions
-#   4. only THEN open day2_lab_solution.py
-# ============================================================
+    for chunk in app.stream(initial_state, config, stream_mode="values"):
+        pass
+
+    final_state = chunk
+
+    print("=== FINAL DRAFT ===")
+    print(final_state["draft"])
+    print()
+
+    print("=== STATS ===")
+    print(f"Turns used: {final_state['turn_count']}/{MAX_TURNS}")
+    print(f"Revisions: {final_state['revision_count']}/{MAX_REVISIONS}")
+    print()
+
+    print("=== EXECUTION LOGS ===")
+    for log in final_state["execution_logs"]:
+        print(f"  {log}")
