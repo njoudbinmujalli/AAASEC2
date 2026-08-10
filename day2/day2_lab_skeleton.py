@@ -16,8 +16,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 
+<<<<<<< HEAD
 MAX_REVISIONS = 2      # cap on writer<->critic loops
 MAX_TURNS = 12         # cap on total supervisor decisions
+=======
+MAX_REVISIONS = 2
+MAX_TURNS = 12
+>>>>>>> 4c0a0e4 (Update day2 lab)
 
 USE_FAKE = os.getenv("USE_FAKE") == "1"
 
@@ -287,4 +292,8 @@ if __name__ == "__main__":
 
     print("=== EXECUTION LOGS ===")
     for log in final_state["execution_logs"]:
+<<<<<<< HEAD
         print(f"  {log}")
+=======
+        print(f"  {log}")
+>>>>>>> 4c0a0e4 (Update day2 lab)
