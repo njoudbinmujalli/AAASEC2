@@ -51,7 +51,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 
-load_dotenv()
+load_dotenv() 
 
 
 # ============================================================
