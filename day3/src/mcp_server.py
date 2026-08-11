@@ -1,20 +1,49 @@
-"""
-DAY 3 — MCP server.
+from fastmcp import FastMCP
 
-READ FIRST:  ../06-fastmcp.md   then   ../07-skills-over-mcp.md
+mcp = FastMCP("Njoud Tools")
 
-Do not continue until `uv run python src/mcp_server.py` serves on :8001
-and a fastmcp Client can list your tools AND your skill resources.
 
-Keep the two categories straight:
-    TOOLS  = actions another agent can CALL   (@mcp.tool)
-    SKILLS = knowledge another agent can READ (SkillsDirectoryProvider)
+@mcp.tool
+def calculate(expression: str) -> float:
+    """Evaluate a basic arithmetic expression, e.g. '2 * (3+4) ** 2'."""
+    import ast
+    import operator
 
-TODO:
-  1. mcp = FastMCP("<your-name> Tools")
-  2. Two @mcp.tool functions (calculate, word_stats — or your own).
-  3. mcp.add_provider(SkillsDirectoryProvider(roots=<path to skills/>))
-  4. __main__: mcp.run(transport="http", host="0.0.0.0", port=8001)
-"""
+    ops = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg,
+    }
 
-# TODO
+    def eval_node(node):
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.BinOp):
+            return ops[type(node.op)](eval_node(node.left), eval_node(node.right))
+        if isinstance(node, ast.UnaryOp):
+            return ops[type(node.op)](eval_node(node.operand))
+        raise ValueError(f"Unsupported expression: {node}")
+
+    tree = ast.parse(expression, mode="eval")
+    return float(eval_node(tree.body))
+
+
+@mcp.tool
+def word_stats(text: str) -> dict:
+    """Return word count, character count, and average word length for a piece of text."""
+    words = text.split()
+    word_count = len(words)
+    char_count = len(text)
+    avg_word_length = sum(len(w) for w in words) / word_count if word_count else 0
+    return {
+        "word_count": word_count,
+        "char_count": char_count,
+        "avg_word_length": round(avg_word_length, 2),
+    }
+
+
+if __name__ == "__main__":
+    mcp.run(transport="http", host="0.0.0.0", port=8001)
