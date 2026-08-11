@@ -53,4 +53,27 @@ async def create_response(request: ResponseRequest):
 
 @app.get("/.well-known/agent-card.json")
 async def agent_card():
-    return {"todo": True} 
+    return {
+        "protocolVersion": "1.0",
+        "name": f"{STUDENT_NAME}-agent",
+        "description": "An AI research assistant that writes structured research briefs and IEEE-style academic abstracts, backed by a Deep Agent with calculator and clock tools.",
+        "url": f"{PUBLIC_URL}/v1/responses",
+        "version": "0.1.0",
+        "capabilities": {"streaming": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
+        "skills": [
+            {
+                "id": "research-brief",
+                "name": "Research Brief",
+                "description": "Writes a one-page executive research brief with headline, context, findings, recommendation, and confidence rating.",
+                "tags": ["research", "summarization"],
+            },
+            {
+                "id": "ieee-abstract",
+                "name": "IEEE Abstract",
+                "description": "Writes a formal IEEE-style academic paper abstract from a description of research work.",
+                "tags": ["academic", "writing"],
+            },
+        ],
+    }
