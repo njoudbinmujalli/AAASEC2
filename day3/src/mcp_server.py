@@ -1,4 +1,6 @@
+from pathlib import Path
 from fastmcp import FastMCP
+from fastmcp.server.providers.skills import SkillsDirectoryProvider
 
 mcp = FastMCP("Njoud Tools")
 
@@ -43,6 +45,9 @@ def word_stats(text: str) -> dict:
         "char_count": char_count,
         "avg_word_length": round(avg_word_length, 2),
     }
+
+
+mcp.add_provider(SkillsDirectoryProvider(roots=Path(__file__).parent.parent / "skills"))
 
 
 if __name__ == "__main__":
